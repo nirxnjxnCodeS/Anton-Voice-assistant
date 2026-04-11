@@ -1,0 +1,23 @@
+[project]
+name = "anton-voice-agent"
+version = "0.1.0"
+description = "Anton — Niranjan's Tony Stark-inspired Voice Agent (OpenAI-powered)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp",
+    "httpx",
+    "livekit-agents[openai,sarvam,silero]>=1.5.1",
+    "python-dotenv",
+]
+
+[project.scripts]
+anton = "server:main"
+anton_voice = "agent_anton:dev" # Points to the wrapper
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server.py"]
