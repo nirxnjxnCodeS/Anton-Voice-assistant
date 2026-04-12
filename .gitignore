@@ -10,7 +10,7 @@ __pycache__/
 # C extensions
 *.so
 
-# Distribution / packaging
+# Distribution / packagingß
 .Python
 build/
 develop-eggs/
@@ -174,3 +174,5 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+.env
