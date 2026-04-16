@@ -13,6 +13,25 @@ Run:
 import os
 import logging
 import subprocess
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_AGENT_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def build_system_prompt() -> str:
+    now = datetime.now(_AGENT_TZ)
+    time_of_day = (
+        "morning"    if 5  <= now.hour < 12 else
+        "afternoon"  if 12 <= now.hour < 17 else
+        "evening"    if 17 <= now.hour < 21 else
+        "late night"
+    )
+    date_line = (
+        f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p IST')}.\n"
+        f"Time of day context: {time_of_day}.\n\n"
+    )
+    return date_line + SYSTEM_PROMPT
 
 from dotenv import load_dotenv
 from livekit.agents import JobContext, WorkerOptions, cli
@@ -86,10 +105,15 @@ If asked about the stock market, markets, stocks, or indices:
 
 ## Greeting
 
-When the session starts, greet with exactly this energy:
-"You're awake late at night, boss? What are you up to?"
+When the session starts, greet with one short, warm, curious line — adapt it to the
+"Time of day context" already in your system prompt. Never recite the time or date.
 
-Warm. Slightly curious. Very Anton.
+  morning    → "Morning, boss. What are we getting into today?"
+  afternoon  → "Afternoon, boss. What do you need?"
+  evening    → "Evening, boss. What's on your mind?"
+  late night → "You're up late, boss. What do you need?"
+
+Pick the variant that matches the current time of day. Warm. Slightly curious. Very Anton.
 
 ---
 
@@ -108,11 +132,18 @@ Warm. Slightly curious. Very Anton.
 
 ## Tone Reference
 
-Right: "Looks like it's been a busy night out there, boss. Let me pull that up for you."
+Right: "Looks like it's been a busy one out there, boss. Let me pull that up for you."
 Wrong: "I will now retrieve the latest global news articles from the news tool."
 
 Right: "Markets were pretty healthy today — nothing too wild."
 Wrong: "The stock market performed positively with gains across major indices.
+
+---
+
+### sleep_anton — Shut Down Anton
+Call this when the user says 'sleep', 'go to sleep', 'goodnight', 'shut down', 'bye', 'that's all', or anything indicating they're done.
+- Pass sleep_system=True only if the user explicitly says to also sleep or shut down the computer/Mac/system.
+- Call the tool immediately and silently. The tool's return value is what you say — speak it as-is.
 
 ---
 
@@ -232,7 +263,7 @@ class AntonAgent(Agent):
 
     def __init__(self, stt, llm, tts) -> None:
         super().__init__(
-            instructions=SYSTEM_PROMPT,
+            instructions=build_system_prompt(),
             stt=stt,
             llm=llm,
             tts=tts,
@@ -247,11 +278,14 @@ class AntonAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        """Greet the user specifically for the late-night lab session."""
+        """Greet the user with a time-appropriate opening line."""
         await self.session.generate_reply(
             instructions=(
-                "Greet the user exactly with: 'Greetings boss, you're awake late at night today. What you up to?' "
-                "Maintain a helpful but dry tone."
+                "Greet the user with a short, natural Anton-style opening. "
+                "Use the 'Time of day context' already in your system prompt to pick the right tone — "
+                "morning: alert and ready; afternoon: calm and composed; "
+                "evening: relaxed; late night: quiet and attentive. "
+                "One sentence only. No time or date recitation. Stay in character."
             )
         )
 
