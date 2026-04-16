@@ -8,12 +8,23 @@ dependencies = [
     "fastmcp",
     "httpx",
     "livekit-agents[openai,sarvam,silero]>=1.5.1",
+    "faster-whisper",
+    "numpy",
+    "pyaudio",
     "python-dotenv",
+    "simpleaudio",
+    "google-api-python-client",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+    "spotipy",
+    "pytz>=2026.1.post1",
+    "psutil",
 ]
 
 [project.scripts]
 anton = "server:main"
 anton_voice = "agent_anton:dev" # Points to the wrapper
+wake = "wake:main"
 
 [build-system]
 requires = ["hatchling"]
