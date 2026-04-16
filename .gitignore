@@ -176,3 +176,10 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 .env
+
+# Google OAuth — NEVER commit these
+credentials.json
+token.json
+
+
+.spotify_cache
