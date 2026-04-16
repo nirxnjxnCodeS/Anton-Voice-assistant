@@ -14,6 +14,13 @@ from googleapiclient.discovery import build
 from anton.google_auth import get_credentials
 
 
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+def _valid_email(address: str) -> bool:
+    return bool(_EMAIL_RE.match(address.strip()))
+
+
 def _build_service():
     return build("gmail", "v1", credentials=get_credentials(), cache_discovery=False)
 
@@ -89,8 +96,8 @@ def register(mcp):
 
         try:
             emails = await asyncio.to_thread(_fetch)
-        except FileNotFoundError as e:
-            return str(e)
+        except FileNotFoundError:
+            return "Google credentials not found, sir. Please run the OAuth setup first."
         except Exception as e:
             return f"I couldn't reach your inbox, sir. Error: {e}"
 
@@ -148,8 +155,8 @@ def register(mcp):
 
         try:
             emails = await asyncio.to_thread(_fetch)
-        except FileNotFoundError as e:
-            return str(e)
+        except FileNotFoundError:
+            return "Google credentials not found, sir. Please run the OAuth setup first."
         except Exception as e:
             return f"Email search failed, sir. Error: {e}"
 
@@ -172,6 +179,9 @@ def register(mcp):
         Create an email draft in Gmail. Does NOT send it — saves to Drafts folder only.
         Use when the user says 'Draft an email to X', 'Write a message to Y but don't send it yet', etc.
         """
+        if not _valid_email(to):
+            return f"That doesn't look like a valid email address, sir: '{to}'."
+
         def _create_draft():
             service = _build_service()
             message = _make_message(to, subject, body)
@@ -183,8 +193,8 @@ def register(mcp):
 
         try:
             draft_id = await asyncio.to_thread(_create_draft)
-        except FileNotFoundError as e:
-            return str(e)
+        except FileNotFoundError:
+            return "Google credentials not found, sir. Please run the OAuth setup first."
         except Exception as e:
             return f"I couldn't create the draft, sir. Error: {e}"
 
@@ -198,8 +208,11 @@ def register(mcp):
         """
         Send an email immediately via Gmail.
         Use when the user explicitly says 'Send an email to X', 'Email Y about Z', etc.
-        WARNING: This sends immediately — use draft_email if unsure.
+        WARNING: This sends immediately — prefer draft_email unless the user explicitly confirms sending.
         """
+        if not _valid_email(to):
+            return f"That doesn't look like a valid email address, sir: '{to}'."
+
         def _send():
             service = _build_service()
             message = _make_message(to, subject, body)
@@ -211,8 +224,8 @@ def register(mcp):
 
         try:
             msg_id = await asyncio.to_thread(_send)
-        except FileNotFoundError as e:
-            return str(e)
+        except FileNotFoundError:
+            return "Google credentials not found, sir. Please run the OAuth setup first."
         except Exception as e:
             return f"Failed to send the email, sir. Error: {e}"
 

@@ -32,5 +32,8 @@ class Config:
     # Home city for weather in briefings
     HOME_CITY: str = os.getenv("HOME_CITY", "Bangalore")
 
+    # Timezone for date/time display (IANA name, e.g. 'Asia/Kolkata')
+    TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
+
 
 config = Config()

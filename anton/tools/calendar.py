@@ -260,6 +260,9 @@ def register(mcp):
             title, date, time, duration_minutes,
         )
 
+        if not 1 <= duration_minutes <= 1440:
+            return "Duration must be between 1 and 1440 minutes (24 hours), sir."
+
         # --- Resolve natural-language dates to YYYY-MM-DD ---
         resolved_date = _resolve_date(date)
         if resolved_date is None:

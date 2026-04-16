@@ -34,7 +34,12 @@ def _build_client() -> spotipy.Spotify:
         cache_path=_CACHE_PATH,
         open_browser=True,
     )
-    return spotipy.Spotify(auth_manager=auth)
+    sp = spotipy.Spotify(auth_manager=auth)
+    # Lock cache file to owner read/write only after first write
+    cache = Path(_CACHE_PATH)
+    if cache.exists():
+        cache.chmod(0o600)
+    return sp
 
 
 def _not_configured() -> str | None:

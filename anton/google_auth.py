@@ -8,16 +8,18 @@ Place credentials.json (downloaded from Google Cloud Console) in the project roo
 """
 
 import os
+import stat
 from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# Both Calendar (read/write) and Gmail (read, compose, send)
+# Principle of least privilege — readonly where possible, send-only for outbound
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 # Paths relative to project root (one directory above this file)
@@ -43,13 +45,15 @@ def get_credentials() -> Credentials:
         else:
             if not CREDENTIALS_PATH.exists():
                 raise FileNotFoundError(
-                    f"credentials.json not found at {CREDENTIALS_PATH}. "
-                    "Download it from Google Cloud Console and place it in the project root. "
-                    "See the setup guide in start.md for instructions."
+                    "credentials.json not found in the project root. "
+                    "Download it from Google Cloud Console and place it there. "
+                    "See start.md for instructions."
                 )
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
             creds = flow.run_local_server(port=0)
 
         TOKEN_PATH.write_text(creds.to_json())
+        # Lock token file to owner read/write only (0o600)
+        os.chmod(str(TOKEN_PATH), stat.S_IRUSR | stat.S_IWUSR)
 
     return creds

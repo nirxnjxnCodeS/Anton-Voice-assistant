@@ -16,7 +16,7 @@ import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-_AGENT_TZ = ZoneInfo("Asia/Kolkata")
+_AGENT_TZ = ZoneInfo(config.TIMEZONE)
 
 
 def build_system_prompt() -> str:
@@ -34,6 +34,7 @@ def build_system_prompt() -> str:
     return date_line + SYSTEM_PROMPT
 
 from dotenv import load_dotenv
+from anton.config import config
 from livekit.agents import JobContext, WorkerOptions, cli
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.llm import mcp

@@ -84,16 +84,30 @@ def _infer_folder(topic: str) -> str:
     return "topics"
 
 
-def _read_note(path: Path) -> str:
+def _assert_within_vault(path: Path, vault: Path) -> None:
+    """Raise PermissionError if path resolves outside the vault directory."""
+    try:
+        path.resolve().relative_to(vault.resolve())
+    except ValueError:
+        raise PermissionError(f"Path escapes vault boundary — operation rejected.")
+
+
+def _read_note(path: Path, vault: Path | None = None) -> str:
+    if vault is not None:
+        _assert_within_vault(path, vault)
     return path.read_text(encoding="utf-8").strip()
 
 
-def _write_note(path: Path, content: str) -> None:
+def _write_note(path: Path, content: str, vault: Path | None = None) -> None:
+    if vault is not None:
+        _assert_within_vault(path, vault)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
-def _append_note(path: Path, addition: str) -> None:
+def _append_note(path: Path, addition: str, vault: Path | None = None) -> None:
+    if vault is not None:
+        _assert_within_vault(path, vault)
     existing = path.read_text(encoding="utf-8").rstrip() if path.exists() else ""
     path.write_text(existing + "\n\n" + addition.strip() + "\n", encoding="utf-8")
 
@@ -124,15 +138,15 @@ def register(mcp):
             note_path = vault / folder / f"{slug}.md"
 
             if note_path.exists():
-                _append_note(note_path, content)
+                _append_note(note_path, content, vault=vault)
                 action = "updated"
             else:
                 body = f"# {topic.title()}\n\n{content}\n"
-                _write_note(note_path, body)
+                _write_note(note_path, body, vault=vault)
                 action = "created"
 
             return f"Noted, sir. I've {action} my memory on {topic}."
-        except ValueError as e:
+        except (ValueError, PermissionError) as e:
             return str(e)
         except Exception as e:
             return f"I couldn't save that memory, sir. Error: {e}"
@@ -153,11 +167,11 @@ def register(mcp):
             for folder in ("people", "projects", "preferences", "topics", "daily"):
                 candidate = vault / folder / f"{slug}.md"
                 if candidate.exists():
-                    content = _read_note(candidate)
+                    content = _read_note(candidate, vault=vault)
                     return f"Here's what I know about {topic}, sir:\n\n{content}"
 
             return f"I don't have any notes on '{topic}', sir."
-        except ValueError as e:
+        except (ValueError, PermissionError) as e:
             return str(e)
         except Exception as e:
             return f"I couldn't retrieve that memory, sir. Error: {e}"
@@ -189,9 +203,9 @@ def register(mcp):
                 )
 
             body = f"# {title}\n\n{content}\n"
-            _write_note(note_path, body)
+            _write_note(note_path, body, vault=vault)
             return f"Note '{title}' created in {dest_folder}/, sir."
-        except ValueError as e:
+        except (ValueError, PermissionError) as e:
             return str(e)
         except Exception as e:
             return f"I couldn't create the note, sir. Error: {e}"
@@ -212,7 +226,7 @@ def register(mcp):
             for folder in ("people", "projects", "preferences", "topics"):
                 candidate = vault / folder / f"{slug}.md"
                 if candidate.exists():
-                    _append_note(candidate, content)
+                    _append_note(candidate, content, vault=vault)
                     return f"Added to '{title}', sir."
 
             return (
@@ -278,9 +292,9 @@ def register(mcp):
                     "Say 'add to today's note' to create one."
                 )
 
-            content = _read_note(path)
+            content = _read_note(path, vault=vault)
             return f"Today's note, sir:\n\n{content}"
-        except ValueError as e:
+        except (ValueError, PermissionError) as e:
             return str(e)
         except Exception as e:
             return f"Couldn't read the daily note, sir. Error: {e}"
@@ -301,9 +315,9 @@ def register(mcp):
 
             if not path.exists():
                 header = f"# Daily Note — {today}\n\n"
-                _write_note(path, header + content.strip() + "\n")
+                _write_note(path, header + content.strip() + "\n", vault=vault)
             else:
-                _append_note(path, content)
+                _append_note(path, content, vault=vault)
 
             return f"Added to today's note, sir."
         except ValueError as e:

@@ -15,7 +15,7 @@ import httpx
 
 from anton.config import config
 
-_IST = ZoneInfo("Asia/Kolkata")
+_IST = ZoneInfo(config.TIMEZONE)
 
 _NEWS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",

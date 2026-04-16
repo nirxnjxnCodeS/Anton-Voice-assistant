@@ -2,11 +2,32 @@
 Web tools — search, fetch pages, and global news briefings.
 """
 
+import ipaddress
+from urllib.parse import urlparse
+
 import httpx
 import xml.etree.ElementTree as ET
 import asyncio  # Required for parallel execution
 import re
 from datetime import datetime
+
+
+def _is_safe_url(url: str) -> bool:
+    """Block private IPs, loopback, non-http(s) schemes — prevents SSRF."""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False
+        host = p.hostname or ""
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            pass  # hostname, not a raw IP — allow
+        return True
+    except Exception:
+        return False
 
 SEED_FEEDS = [
     'https://feeds.bbci.co.uk/news/world/rss.xml',
@@ -89,7 +110,9 @@ def register(mcp):
     @mcp.tool()
     async def fetch_url(url: str) -> str:
         """Fetch the raw text content of a URL."""
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        if not _is_safe_url(url):
+            return "I can't fetch that URL, sir. Only public web addresses are allowed."
+        async with httpx.AsyncClient(follow_redirects=False, timeout=10) as client:
             response = await client.get(url)
             response.raise_for_status()
             return response.text[:4000]
