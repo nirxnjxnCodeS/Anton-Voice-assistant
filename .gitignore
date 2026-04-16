@@ -183,3 +183,15 @@ token.json
 
 
 .spotify_cache
+
+# macOS
+.DS_Store
+
+# Obsidian app config — local only, not portable
+.obsidian/
+
+# Graphify generated output — not source code
+graphify-out/
+
+# Audio assets — keep local, don't bloat git history
+wake_chime.wav
