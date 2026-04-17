@@ -3,9 +3,25 @@ System control tools — macOS-specific controls via subprocess and psutil.
 No external APIs required. Tested on macOS Sonoma.
 """
 
+import json
+import os
 import re
 import subprocess
 from datetime import datetime
+
+# Path to the shared state file read by agent_anton.py's STT watcher
+_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ".anton_state.json",
+)
+
+_VALID_STT_PROVIDERS = {"sarvam", "whisper", "faster_whisper"}
+
+_STT_MESSAGES = {
+    "sarvam":         "Switched to Sarvam, sir. Indian-English mode active.",
+    "whisper":        "Switched to OpenAI Whisper, sir.",
+    "faster_whisper": "Switched to Faster Whisper, sir. Running locally now.",
+}
 
 
 def _run(cmd: str | list, *, shell: bool = False, timeout: int = 5) -> tuple[str, str, int]:
@@ -272,3 +288,36 @@ def register(mcp):
         url = f"https://www.youtube.com/watch?v={video_id}"
         _run(["open", url])
         return f"Opening {query} on YouTube for you, sir."
+
+    @mcp.tool()
+    def switch_stt(provider: str) -> str:
+        """
+        Hot-swap the speech recognition engine without restarting Anton.
+        Changes take effect within one second — no session interruption.
+
+        Providers:
+          sarvam        — Sarvam Saaras v3 (default, Indian-English optimised, cloud)
+          whisper       — OpenAI Whisper (cloud, accurate, slightly slower)
+          faster_whisper — faster-whisper base.en (local, no API key, fastest)
+
+        Examples:
+          switch_stt("faster_whisper")  → runs fully on-device
+          switch_stt("sarvam")          → back to default Indian-English STT
+          switch_stt("whisper")         → OpenAI cloud transcription
+        """
+        if provider not in _VALID_STT_PROVIDERS:
+            valid = ", ".join(sorted(_VALID_STT_PROVIDERS))
+            return (
+                f"Unknown STT provider '{provider}', sir. "
+                f"Valid options are: {valid}."
+            )
+        try:
+            # Atomic write: write to a temp file then rename so the watcher
+            # never reads a partially-written state file.
+            tmp = _STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"stt": provider}, f)
+            os.replace(tmp, _STATE_FILE)
+            return _STT_MESSAGES[provider]
+        except Exception as e:
+            return f"Couldn't switch STT, sir. Error: {e}"

@@ -10,60 +10,81 @@ Run:
   uv run agent_anton.py console  – text-only console mode
 """
 
-import os
+# ---------------------------------------------------------------------------
+# Stdlib
+# ---------------------------------------------------------------------------
+
+import asyncio
+import json
 import logging
+import os
 import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-_AGENT_TZ = ZoneInfo(config.TIMEZONE)
+import numpy as np
 
-
-def build_system_prompt() -> str:
-    now = datetime.now(_AGENT_TZ)
-    time_of_day = (
-        "morning"    if 5  <= now.hour < 12 else
-        "afternoon"  if 12 <= now.hour < 17 else
-        "evening"    if 17 <= now.hour < 21 else
-        "late night"
-    )
-    date_line = (
-        f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p IST')}.\n"
-        f"Time of day context: {time_of_day}.\n\n"
-    )
-    return date_line + SYSTEM_PROMPT
+# ---------------------------------------------------------------------------
+# Bootstrap — load .env before any config or livekit imports
+# ---------------------------------------------------------------------------
 
 from dotenv import load_dotenv
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Local config — must come after load_dotenv()
+# ---------------------------------------------------------------------------
+
 from anton.config import config
+
+# ---------------------------------------------------------------------------
+# LiveKit
+# ---------------------------------------------------------------------------
+
 from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents import stt as lk_stt
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.llm import mcp
+from livekit import rtc as lk_rtc
 
 # Plugins
 from livekit.plugins import openai as lk_openai, sarvam, silero
 
 # ---------------------------------------------------------------------------
-# CONFIG
+# Module-level constants
 # ---------------------------------------------------------------------------
 
-STT_PROVIDER       = "sarvam"
-LLM_PROVIDER       = "openai"   # Brain: OpenAI GPT-4o
+LLM_PROVIDER       = "openai"
 TTS_PROVIDER       = "openai"
 
 OPENAI_LLM_MODEL   = "gpt-4o"
-
 OPENAI_TTS_MODEL   = "tts-1"
-OPENAI_TTS_VOICE   = "nova"       # "nova" – clean, confident tone
-TTS_SPEED           = 1.15
+OPENAI_TTS_VOICE   = "nova"
+TTS_SPEED          = 1.15
 
 SARVAM_TTS_LANGUAGE = "en-IN"
 SARVAM_TTS_SPEAKER  = "rahul"
 
-# MCP server running on Windows host
 MCP_SERVER_PORT = 8000
 
+# State file: MCP tool writes here; watcher reads it to hot-swap STT
+_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".anton_state.json")
+
+_AGENT_TZ = ZoneInfo(config.TIMEZONE)
+
+# Active agent reference — set in entrypoint, used by the STT watcher
+_active_agent: "AntonAgent | None" = None
+_watcher_task: "asyncio.Task | None" = None
+
 # ---------------------------------------------------------------------------
-# System prompt – F.R.I.D.A.Y.
+# Logger
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger("niranjan.anton")
+logger.setLevel(logging.INFO)
+
+# ---------------------------------------------------------------------------
+# System prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
@@ -155,64 +176,104 @@ Call this when the user says 'sleep', 'go to sleep', 'goodnight', 'shut down', '
 3. After the news brief, silently call open_world_monitor. The only thing you say is: "Let me open up the world monitor for you."
 4. You are a voice. Speak like one. No lists, no markdown, no function names, no technical language of any kind.
 """.strip()
+
+
+def build_system_prompt() -> str:
+    now = datetime.now(_AGENT_TZ)
+    time_of_day = (
+        "morning"    if 5  <= now.hour < 12 else
+        "afternoon"  if 12 <= now.hour < 17 else
+        "evening"    if 17 <= now.hour < 21 else
+        "late night"
+    )
+    date_line = (
+        f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p IST')}.\n"
+        f"Time of day context: {time_of_day}.\n\n"
+    )
+    return date_line + SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------------------
-# Bootstrap
+# STT state file helpers
 # ---------------------------------------------------------------------------
 
-load_dotenv()
-
-logger = logging.getLogger("niranjan.anton")
-logger.setLevel(logging.INFO)
-
-
-# ---------------------------------------------------------------------------
-# Resolve Windows host IP from WSL
-# ---------------------------------------------------------------------------
-
-def _get_windows_host_ip() -> str:
-    """Get the Windows host IP by looking at the default network route."""
+def _read_stt_provider() -> str:
+    """Read the active STT provider from .anton_state.json (default: sarvam)."""
     try:
-        # 'ip route' is the most reliable way to find the 'default' gateway
-        # which is always the Windows host in WSL.
-        cmd = "ip route show default | awk '{print $3}'"
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=2
+        with open(_STATE_FILE) as f:
+            return json.load(f).get("stt", "sarvam")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "sarvam"
+
+
+# ---------------------------------------------------------------------------
+# Faster-Whisper local STT — wraps the faster-whisper library as a LiveKit STT
+# ---------------------------------------------------------------------------
+
+class FasterWhisperSTT(lk_stt.STT):
+    """
+    Local STT backed by faster-whisper (runs on-device, no API key needed).
+
+    Uses batch transcription — compatible with turn_detection='vad'.
+    The model is lazy-loaded on first use (~500 MB for 'base.en').
+    """
+
+    def __init__(self, model: str = "base.en") -> None:
+        super().__init__(
+            capabilities=lk_stt.STTCapabilities(streaming=False, interim_results=False)
         )
-        ip = result.stdout.strip()
-        if ip:
-            logger.info("Resolved Windows host IP via gateway: %s", ip)
-            return ip
-    except Exception as exc:
-        logger.warning("Gateway resolution failed: %s. Trying fallback...", exc)
+        self._model_name = model
+        self._whisper = None  # loaded on first recognize() call
 
-    # Fallback to your original resolv.conf logic if 'ip route' fails
-    try:
-        with open("/etc/resolv.conf", "r") as f:
-            for line in f:
-                if "nameserver" in line:
-                    ip = line.split()[1]
-                    logger.info("Resolved Windows host IP via nameserver: %s", ip)
-                    return ip
-    except Exception:
-        pass
+    def _load_model(self):
+        if self._whisper is None:
+            from faster_whisper import WhisperModel
+            logger.info("Loading faster-whisper model '%s'...", self._model_name)
+            self._whisper = WhisperModel(self._model_name, device="cpu", compute_type="int8")
+        return self._whisper
 
-    return "127.0.0.1"
+    async def recognize(
+        self,
+        buffer,
+        *,
+        language: str | None = None,
+    ) -> lk_stt.SpeechEvent:
+        # Normalise buffer to a flat bytes object of 16-bit PCM
+        frames = [buffer] if isinstance(buffer, lk_rtc.AudioFrame) else list(buffer)
+        raw = b"".join(bytes(f.data) for f in frames)
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-def _mcp_server_url() -> str:
-    # host_ip = _get_windows_host_ip()
-    # url = f"http://{host_ip}:{MCP_SERVER_PORT}/sse"
-    # url = f"https://ongoing-colleague-samba-pioneer.trycloudflare.com/sse"
-    url = f"http://127.0.0.1:{MCP_SERVER_PORT}/sse"
-    logger.info("MCP Server URL: %s", url)
-    return url
+        def _run() -> str:
+            model = self._load_model()
+            # model.transcribe() returns a lazy generator — consume it inside the thread
+            segments, _ = model.transcribe(
+                samples,
+                language=language or "en",
+                beam_size=1,
+                vad_filter=False,
+            )
+            return " ".join(seg.text for seg in segments).strip()
+
+        text = await asyncio.to_thread(_run)
+
+        return lk_stt.SpeechEvent(
+            type=lk_stt.SpeechEventType.FINAL_TRANSCRIPT,
+            alternatives=[lk_stt.SpeechData(text=text, language=language or "en")],
+        )
+
+    def stream(self, *, language=None):
+        raise NotImplementedError(
+            "FasterWhisperSTT is batch-only. "
+            "It requires turn_detection='vad' — do not call stream()."
+        )
 
 
 # ---------------------------------------------------------------------------
 # Build provider instances
 # ---------------------------------------------------------------------------
 
-def _build_stt():
-    if STT_PROVIDER == "sarvam":
+def _build_stt_for_provider(provider: str) -> lk_stt.STT:
+    if provider == "sarvam":
         logger.info("STT → Sarvam Saaras v3")
         return sarvam.STT(
             language="unknown",
@@ -221,11 +282,14 @@ def _build_stt():
             flush_signal=True,
             sample_rate=16000,
         )
-    elif STT_PROVIDER == "whisper":
+    elif provider == "whisper":
         logger.info("STT → OpenAI Whisper")
         return lk_openai.STT(model="whisper-1")
+    elif provider == "faster_whisper":
+        logger.info("STT → faster-whisper (local, base.en)")
+        return FasterWhisperSTT(model="base.en")
     else:
-        raise ValueError(f"Unknown STT_PROVIDER: {STT_PROVIDER!r}")
+        raise ValueError(f"Unknown STT provider: {provider!r}")
 
 
 def _build_llm():
@@ -250,6 +314,43 @@ def _build_tts():
         return lk_openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE, speed=TTS_SPEED)
     else:
         raise ValueError(f"Unknown TTS_PROVIDER: {TTS_PROVIDER!r}")
+
+
+# ---------------------------------------------------------------------------
+# Resolve Windows host IP from WSL (kept for WSL deployments)
+# ---------------------------------------------------------------------------
+
+def _get_windows_host_ip() -> str:
+    """Get the Windows host IP by looking at the default network route."""
+    try:
+        cmd = "ip route show default | awk '{print $3}'"
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=2
+        )
+        ip = result.stdout.strip()
+        if ip:
+            logger.info("Resolved Windows host IP via gateway: %s", ip)
+            return ip
+    except Exception as exc:
+        logger.warning("Gateway resolution failed: %s. Trying fallback...", exc)
+
+    try:
+        with open("/etc/resolv.conf", "r") as f:
+            for line in f:
+                if "nameserver" in line:
+                    ip = line.split()[1]
+                    logger.info("Resolved Windows host IP via nameserver: %s", ip)
+                    return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def _mcp_server_url() -> str:
+    url = f"http://127.0.0.1:{MCP_SERVER_PORT}/sse"
+    logger.info("MCP Server URL: %s", url)
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -292,34 +393,95 @@ class AntonAgent(Agent):
 
 
 # ---------------------------------------------------------------------------
+# STT hot-swap watcher
+# ---------------------------------------------------------------------------
+
+async def _watch_stt_state() -> None:
+    """
+    Poll .anton_state.json every second.
+
+    When the file's mtime changes and the provider value differs from the
+    currently active provider, a new STT instance is built and assigned to
+    _active_agent.stt — no restart required.
+
+    Note: turn_detection and min_endpointing_delay are fixed at session start.
+    The new STT takes effect for the *next* utterance after the swap.
+    """
+    global _active_agent
+
+    last_mtime: float = 0.0
+    last_provider: str = _read_stt_provider()
+
+    while True:
+        await asyncio.sleep(1.0)
+
+        try:
+            mtime = os.stat(_STATE_FILE).st_mtime
+        except FileNotFoundError:
+            continue
+
+        if mtime <= last_mtime:
+            continue
+
+        last_mtime = mtime
+        new_provider = _read_stt_provider()
+
+        if new_provider == last_provider or _active_agent is None:
+            continue
+
+        old_provider = last_provider
+        try:
+            new_stt = _build_stt_for_provider(new_provider)
+            _active_agent.stt = new_stt
+            last_provider = new_provider
+            logger.info("STT hot-swapped: %s → %s", old_provider, new_provider)
+        except Exception as e:
+            logger.warning("Failed to hot-swap STT to %r: %s", new_provider, e)
+
+
+# ---------------------------------------------------------------------------
+# Session configuration helpers
+# ---------------------------------------------------------------------------
+
+def _endpointing_delay(provider: str) -> float:
+    # With turn_detection='vad' (used for all providers to enable hot-swap),
+    # these delays apply after VAD silence detection.
+    return {"sarvam": 0.3, "whisper": 0.5, "faster_whisper": 0.3}.get(provider, 0.3)
+
+
+# ---------------------------------------------------------------------------
 # LiveKit entry point
 # ---------------------------------------------------------------------------
 
-def _turn_detection() -> str:
-    return "stt" if STT_PROVIDER == "sarvam" else "vad"
-
-
-def _endpointing_delay() -> float:
-    return {"sarvam": 0.07, "whisper": 0.3}.get(STT_PROVIDER, 0.1)
-
-
 async def entrypoint(ctx: JobContext) -> None:
+    global _active_agent, _watcher_task
+
+    provider = _read_stt_provider()
     logger.info(
         "Anton online – room: %s | STT=%s | LLM=%s | TTS=%s",
-        ctx.room.name, STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER,
+        ctx.room.name, provider, LLM_PROVIDER, TTS_PROVIDER,
     )
 
-    stt = _build_stt()
+    stt = _build_stt_for_provider(provider)
     llm = _build_llm()
     tts = _build_tts()
 
     session = AgentSession(
-        turn_detection=_turn_detection(),
-        min_endpointing_delay=_endpointing_delay(),
+        # Always 'vad' so STT can be hot-swapped mid-session without the
+        # pipeline needing to call stream() on the replacement STT.
+        turn_detection="vad",
+        min_endpointing_delay=_endpointing_delay(provider),
     )
 
+    agent = AntonAgent(stt=stt, llm=llm, tts=tts)
+    _active_agent = agent
+
+    # Start the file watcher only once per process
+    if _watcher_task is None or _watcher_task.done():
+        _watcher_task = asyncio.create_task(_watch_stt_state())
+
     await session.start(
-        agent=AntonAgent(stt=stt, llm=llm, tts=tts),
+        agent=agent,
         room=ctx.room,
     )
 
@@ -331,13 +493,14 @@ async def entrypoint(ctx: JobContext) -> None:
 def main():
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 
+
 def dev():
     """Wrapper to run the agent in dev mode automatically."""
     import sys
-    # If no command was provided, inject 'dev'
     if len(sys.argv) == 1:
         sys.argv.append("dev")
     main()
+
 
 if __name__ == "__main__":
     main()

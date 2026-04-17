@@ -195,3 +195,6 @@ graphify-out/
 
 # Audio assets — keep local, don't bloat git history
 wake_chime.wav
+
+# Runtime state — written by switch_stt tool, read by agent_anton.py watcher
+.anton_state.json

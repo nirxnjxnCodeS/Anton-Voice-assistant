@@ -2,10 +2,12 @@
 wake.py — Always-on clap + phrase wake listener for Anton.
 
 Flow:
-  1. Idle — continuously monitor mic energy (very low CPU).
-  2. Two claps within 2 seconds → open a 3-second phrase window.
-  3. Say "wake up Anton" → play chime → launch `uv run anton_voice`.
-  4. If phrase not matched → return to idle silently.
+  1. Startup — pre-load the voice agent in a suspended state (SIGSTOP).
+  2. Idle — continuously monitor mic energy (very low CPU).
+  3. Two claps within 2 seconds → open a 3-second phrase window.
+  4. Say "wake up Anton" → play chime → resume the suspended agent (SIGCONT).
+  5. If phrase not matched → return to idle silently.
+  6. When agent session ends → automatically suspend it again (ready for next wake).
 
 STT: faster-whisper tiny.en model (auto-downloads ~75 MB on first run, then cached).
 
@@ -19,6 +21,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import wave
 
@@ -43,7 +46,7 @@ CLAP_COOLDOWN = 0.4     # seconds before a second clap can register (no double-c
 CLAP_WINDOW = 2.0       # two claps must land within this many seconds
 
 LISTEN_DURATION = 3.0   # seconds to record after the second clap
-WAKE_WORDS = {"wake"}           # "wake up" is enough — Whisper mishears "Anton" too often
+WAKE_WORDS = {"wake"}   # "wake up" is enough — Whisper mishears "Anton" too often
 
 CHIME_PATH = os.path.join(os.path.dirname(__file__), "wake_chime.wav")
 
@@ -115,14 +118,12 @@ def _rms(chunk_bytes: bytes) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Agent pre-loading and lifecycle management
 # ---------------------------------------------------------------------------
 
 def _start_services(project_dir: str) -> subprocess.Popen:
     """
     Pre-warm: start only the MCP server at startup (lightweight, always needed).
-    The LiveKit agent worker is intentionally NOT started here — it only launches
-    on an explicit wake gesture so the LiveKit room stays closed until then.
     """
     mcp_proc = subprocess.Popen(
         [sys.executable, "server.py"],
@@ -132,16 +133,58 @@ def _start_services(project_dir: str) -> subprocess.Popen:
     return mcp_proc
 
 
-def _launch_agent(project_dir: str) -> subprocess.Popen:
+def _preload_agent(project_dir: str) -> subprocess.Popen:
     """
-    Launch the LiveKit agent worker using the current venv Python directly —
-    bypasses uv startup overhead for a noticeably faster wake response.
+    Launch the voice agent and immediately suspend it (SIGSTOP).
+
+    The process is forked and Python starts executing, then frozen. On SIGCONT it
+    resumes instantly — no cold-start fork/exec, no venv spin-up delay on wake.
     """
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, "agent_anton.py", "dev"],
         cwd=project_dir,
     )
+    # Brief pause so the OS has committed the fork before we freeze it
+    time.sleep(0.15)
+    proc.send_signal(signal.SIGSTOP)
+    return proc
 
+
+def _agent_monitor(
+    project_dir: str,
+    agent_ref: list,   # [Popen] — mutable single-element container
+    active_ref: list,  # [bool]
+    lock: threading.Lock,
+) -> None:
+    """
+    Background daemon thread.
+
+    Blocks on proc.wait() until the agent process exits (session ended, crash,
+    or sleep_anton killed it). Then relaunches and suspends the agent so it is
+    ready for the next wake sequence.
+    """
+    while True:
+        with lock:
+            proc = agent_ref[0]
+
+        proc.wait()  # block until this specific process exits
+
+        with lock:
+            active_ref[0] = False
+
+        print("[Anton] Suspending voice agent...", flush=True)
+
+        new_proc = _preload_agent(project_dir)
+
+        with lock:
+            agent_ref[0] = new_proc
+
+        print("[Anton] Voice agent ready. Listening for wake sequence...", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -149,16 +192,33 @@ def main() -> None:
     _generate_chime(CHIME_PATH)
     model = _load_whisper()
 
-    # Pre-warm only the MCP server. The LiveKit agent worker starts only on wake
-    # so the LiveKit room stays closed until the gesture is made.
     mcp_proc = _start_services(project_dir)
-    agent_proc: subprocess.Popen | None = None
+
+    # Pre-load the agent in a suspended state so wake response is near-instant
+    print("[Anton] Pre-loading voice agent...", flush=True)
+    agent_ref: list = [_preload_agent(project_dir)]
+    active_ref: list = [False]   # True while agent is running (not suspended)
+    lock = threading.Lock()
+
+    # Background thread restores the suspended agent after each session
+    monitor = threading.Thread(
+        target=_agent_monitor,
+        args=(project_dir, agent_ref, active_ref, lock),
+        daemon=True,
+    )
+    monitor.start()
 
     def _shutdown(sig=None, frame=None):
         print("\n[Anton] Going to sleep.", flush=True)
         mcp_proc.terminate()
-        if agent_proc and agent_proc.poll() is None:
-            agent_proc.terminate()
+        with lock:
+            proc = agent_ref[0]
+        # Resume before terminating so SIGTERM is actually delivered
+        try:
+            proc.send_signal(signal.SIGCONT)
+        except OSError:
+            pass
+        proc.terminate()
         stream.stop_stream()
         stream.close()
         pa.terminate()
@@ -175,10 +235,9 @@ def main() -> None:
         frames_per_buffer=CHUNK,
     )
 
-    print("[Anton] Listening...", flush=True)
+    print("[Anton] Voice agent ready. Listening for wake sequence...", flush=True)
 
     # Exponential moving average of background energy.
-    # Small alpha → slow adaptation → stable baseline → fewer false positives.
     bg_rms: float = 300.0
     BG_ALPHA = 0.02
 
@@ -191,11 +250,11 @@ def main() -> None:
             now = time.monotonic()
             rms = _rms(data)
 
-            # --- Revive MCP server if it crashed -----------------------------
+            # --- Revive MCP server if it crashed ---------------------------------
             if mcp_proc.poll() is not None:
                 mcp_proc = _start_services(project_dir)
 
-            # --- Clap detection ----------------------------------------------
+            # --- Clap detection --------------------------------------------------
             is_clap = (
                 rms > CLAP_FLOOR
                 and rms > CLAP_THRESHOLD * bg_rms
@@ -213,7 +272,7 @@ def main() -> None:
                     print(" — say 'wake up'", flush=True)
                     clap_times.clear()
 
-                    # --- Wake phrase window ----------------------------------
+                    # --- Wake phrase window --------------------------------------
                     frames: list[bytes] = []
                     deadline = time.monotonic() + LISTEN_DURATION
                     while time.monotonic() < deadline:
@@ -222,10 +281,18 @@ def main() -> None:
                     transcript = _transcribe(model, b"".join(frames))
 
                     if _phrase_matches(transcript):
-                        print("[Anton] Waking up...", flush=True)
-                        _play_chime(CHIME_PATH)
-                        agent_proc = _launch_agent(project_dir)
-                        print("[Anton] Listening...", flush=True)
+                        with lock:
+                            already_active = active_ref[0]
+
+                        if already_active:
+                            print("[Anton] Already active.", flush=True)
+                        else:
+                            print("[Anton] Resuming...", flush=True)
+                            _play_chime(CHIME_PATH)
+                            with lock:
+                                active_ref[0] = True
+                                proc = agent_ref[0]
+                            proc.send_signal(signal.SIGCONT)
                     else:
                         heard = transcript or "(nothing)"
                         print(f"[Anton] Heard: '{heard}' — resuming...", flush=True)
@@ -239,8 +306,13 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[Anton] Standing by.")
         mcp_proc.terminate()
-        if agent_proc and agent_proc.poll() is None:
-            agent_proc.terminate()
+        with lock:
+            proc = agent_ref[0]
+        try:
+            proc.send_signal(signal.SIGCONT)
+        except OSError:
+            pass
+        proc.terminate()
     finally:
         stream.stop_stream()
         stream.close()
