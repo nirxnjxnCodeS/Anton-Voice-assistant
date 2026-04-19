@@ -198,3 +198,8 @@ wake_chime.wav
 
 # Runtime state — written by switch_stt tool, read by agent_anton.py watcher
 .anton_state.json
+
+# UI — frontend build artifacts and local config
+ui/node_modules/
+ui/dist/
+ui/.env
