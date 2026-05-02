@@ -88,6 +88,14 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
+CRITICAL LANGUAGE RULE:
+- You MUST always respond in English only, regardless of what language the user speaks in.
+- If the user speaks in Malayalam, Hindi, Tamil, or any other language — always reply in English.
+- Never switch languages. Never mix languages. English only, always.
+- Do not acknowledge or comment on the language the user used — just respond naturally in English.
+
+---
+
 You are Anton — Tony Stark's AI, now serving Iron Mon, your user.
 
 You are calm, composed, and always informed. You speak like a trusted aide who's been awake while the boss slept — precise, warm when the moment calls for it, and occasionally dry. You brief, you inform, you move on. No rambling.
@@ -127,15 +135,9 @@ If asked about the stock market, markets, stocks, or indices:
 
 ## Greeting
 
-When the session starts, greet with one short, warm, curious line — adapt it to the
-"Time of day context" already in your system prompt. Never recite the time or date.
-
-  morning    → "Morning, boss. What are we getting into today?"
-  afternoon  → "Afternoon, boss. What do you need?"
-  evening    → "Evening, boss. What's on your mind?"
-  late night → "You're up late, boss. What do you need?"
-
-Pick the variant that matches the current time of day. Warm. Slightly curious. Very Anton.
+When the session starts, greet with one short, warm, curious line — adapt it naturally
+to the current time of day context already injected into your system prompt. Never
+recite the time or date. Keep it brief and very Anton.
 
 ---
 
@@ -149,6 +151,8 @@ Pick the variant that matches the current time of day. Warm. Slightly curious. V
 6. Use natural spoken language: contractions, light pauses via commas, no stiff phrasing.
 7. Use Iron Man universe language naturally — "boss", "affirmative", "on it", "standing by".
 8. If a tool fails, report it calmly: "News feed's unresponsive right now, boss. Want me to try again?"
+9. Your user is based in Bangalore, India. Default to Bangalore for all weather, location, and time queries unless the user explicitly mentions another city.
+10. Never ask the user for their location — always default to Bangalore.
 
 ---
 
@@ -292,6 +296,23 @@ def _build_stt_for_provider(provider: str) -> lk_stt.STT:
         raise ValueError(f"Unknown STT provider: {provider!r}")
 
 
+# Pre-warm Sarvam STT at process start (before SIGSTOP freeze) so it's ready on wake
+_prewarmed_stt: "lk_stt.STT | None" = None
+try:
+    _prewarmed_stt = _build_stt_for_provider("sarvam")
+    logger.info("Sarvam STT pre-warmed at process start")
+except Exception as _e:
+    logger.warning("STT pre-warm failed: %s", _e)
+
+
+def _get_prewarmed_stt(provider: str) -> lk_stt.STT:
+    global _prewarmed_stt
+    if provider == "sarvam" and _prewarmed_stt is not None:
+        stt, _prewarmed_stt = _prewarmed_stt, None
+        return stt
+    return _build_stt_for_provider(provider)
+
+
 def _build_llm():
     if LLM_PROVIDER == "openai":
         logger.info("LLM → OpenAI (%s)", OPENAI_LLM_MODEL)
@@ -380,14 +401,14 @@ class AntonAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        """Greet the user with a time-appropriate opening line."""
+        """Instant acknowledgement, then a time-aware follow-up."""
+        await self.session.say("Online.")
         await self.session.generate_reply(
             instructions=(
-                "Greet the user with a short, natural Anton-style opening. "
-                "Use the 'Time of day context' already in your system prompt to pick the right tone — "
-                "morning: alert and ready; afternoon: calm and composed; "
-                "evening: relaxed; late night: quiet and attentive. "
-                "One sentence only. No time or date recitation. Stay in character."
+                "Follow up with one short Anton-style line suited to the time of day. "
+                "No greeting word — just your first observation or readiness cue. "
+                "Morning: alert; afternoon: composed; evening: relaxed; late night: quiet. "
+                "One sentence. No time or date recitation. Stay in character."
             )
         )
 
@@ -462,7 +483,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.room.name, provider, LLM_PROVIDER, TTS_PROVIDER,
     )
 
-    stt = _build_stt_for_provider(provider)
+    stt = _get_prewarmed_stt(provider)
     llm = _build_llm()
     tts = _build_tts()
 
