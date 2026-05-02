@@ -15,6 +15,7 @@ Run:
     uv run wake
 """
 
+import json
 import math
 import os
 import signal
@@ -49,6 +50,8 @@ LISTEN_DURATION = 3.0   # seconds to record after the second clap
 WAKE_WORDS = {"wake"}   # "wake up" is enough — Whisper mishears "Anton" too often
 
 CHIME_PATH = os.path.join(os.path.dirname(__file__), "wake_chime.wav")
+_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".anton_state.json")
+_PING_SOUND = "/System/Library/Sounds/Ping.aiff"
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +291,14 @@ def main() -> None:
                             print("[Anton] Already active.", flush=True)
                         else:
                             print("[Anton] Resuming...", flush=True)
-                            _play_chime(CHIME_PATH)
+                            # Instant non-blocking audio feedback before agent connects
+                            subprocess.Popen(["afplay", _PING_SOUND])
+                            # Signal UI immediately so it can show "Waking up..."
+                            try:
+                                with open(_STATE_FILE, "w") as _f:
+                                    json.dump({"status": "waking"}, _f)
+                            except OSError:
+                                pass
                             with lock:
                                 active_ref[0] = True
                                 proc = agent_ref[0]
