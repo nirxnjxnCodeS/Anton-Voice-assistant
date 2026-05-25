@@ -180,3 +180,4 @@ uv run python -c "from anton.google_auth import get_google_service; get_google_s
 | 8000 | MCP Server (FastMCP / SSE)     |
 | 3000 | Anton UI (Vite dev server)     |
 | 3001 | Token Server (Express / LiveKit JWT) |
+
